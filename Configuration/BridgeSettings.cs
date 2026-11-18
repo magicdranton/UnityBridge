@@ -20,19 +20,25 @@ public sealed class UnityOptions
 public sealed record BridgeSettings(BridgeOptions Bridge, UnityOptions Unity)
 {
     public bool UnityAvailable => File.Exists(Unity.EditorPath);
-    public bool ProjectAvailable => Directory.Exists(Path.Combine(Unity.ProjectPath, "Assets")) && Directory.Exists(Path.Combine(Unity.ProjectPath, "ProjectSettings"));
+    public bool ProjectAvailable => Directory.Exists(Path.Combine(Unity.ProjectPath, "Assets")) 
+            && Directory.Exists(Path.Combine(Unity.ProjectPath, "ProjectSettings"));
     public static BridgeSettings Load(IConfiguration config)
     {
         var b = config.GetSection("Bridge").Get<BridgeOptions>() ?? new();
+
         var u = config.GetSection("Unity").Get<UnityOptions>() ?? new();
+
         if (!System.Net.IPAddress.TryParse(b.Host, out _) || b.Port is < 1 or > 65535 ||
             b.MaxQueuedJobs is < 1 or > 3 || b.MaxLogLines is < 1 or > 300 || b.JobTimeoutMinutes is < 1 or > 1440)
-            throw new InvalidOperationException("Invalid Bridge limits or listen address.");
+                throw new InvalidOperationException("Invalid Bridge limits or listen address.");
         if (string.IsNullOrWhiteSpace(b.ApiToken) || b.ApiToken == "CHANGE_ME")
-            throw new InvalidOperationException("Set Bridge:ApiToken to a non-placeholder token (or use Bridge__ApiToken).");
+                throw new InvalidOperationException("Set Bridge:ApiToken to a non-placeholder token (or use Bridge__ApiToken).");
+
         if (new[] { u.EditorPath, u.ProjectPath, u.LogDirectory }.Any(string.IsNullOrWhiteSpace))
-            throw new InvalidOperationException("Unity paths must be configured.");
+                throw new InvalidOperationException("Unity paths must be configured.");
+
         Directory.CreateDirectory(u.LogDirectory);
+
         return new(b, u);
     }
 }
