@@ -6,42 +6,59 @@ using UnityBridge.Unity;
 
 namespace UnityBridge.Worker;
 
-public sealed class BridgeWorker(JobManager jobs, UnityRunner runner, BridgeSettings settings, ILogger<BridgeWorker> logger) : BackgroundService
+public sealed class CBridgeWorker : BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    private readonly CJobManager m_jobs;
+    private readonly CUnityRunner m_runner;
+    private readonly CBridgeSettings m_settings;
+    private readonly ILogger<CBridgeWorker> m_logger;
+
+    public CBridgeWorker(CJobManager p_jobs, CUnityRunner p_runner, CBridgeSettings p_settings, ILogger<CBridgeWorker> p_logger)
     {
-        logger.LogInformation("Unity available: {Unity}; project available: {Project}", settings.UnityAvailable, settings.ProjectAvailable);
+        m_jobs = p_jobs;
+        m_runner = p_runner;
+        m_settings = p_settings;
+        m_logger = p_logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken p_stoppingToken)
+    {
+        m_logger.LogInformation("Unity available: {Unity}; project available: {Project}", m_settings.UnityAvailable, m_settings.ProjectAvailable);
 
         try
         {
-            await foreach (var job in jobs.Reader.ReadAllAsync(stoppingToken))
+            // Process queued jobs sequentially with an individual timeout.
+            await foreach (var v_job in m_jobs.Reader.ReadAllAsync(p_stoppingToken))
             {
-                jobs.Start(job.Id);
+                m_jobs.Start(v_job.Id);
 
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                using var v_timeout = CancellationTokenSource.CreateLinkedTokenSource(p_stoppingToken);
 
-                timeout.CancelAfter(TimeSpan.FromMinutes(settings.Bridge.JobTimeoutMinutes));
+                v_timeout.CancelAfter(TimeSpan.FromMinutes(m_settings.Bridge.JobTimeoutMinutes));
                 try
                 {
-                    var result = await runner.Compile(job, timeout.Token);
-                    jobs.Finish(job.Id, result.Errors.Length == 0 ? JobStatus.Succeeded : JobStatus.Failed, result.ExitCode, result.Errors);
+                    var v_result = await m_runner.Compile(v_job, v_timeout.Token);
+                    m_jobs.Finish(v_job.Id, v_result.Errors.Length == 0 ? EnumJobStatus.Succeeded : EnumJobStatus.Failed, v_result.ExitCode, v_result.Errors);
                 }
-                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-                { 
-                    jobs.Finish(job.Id, stoppingToken.IsCancellationRequested ? JobStatus.Cancelled : JobStatus.TimedOut, null, 
-                        ["Compilation cancelled or timed out."]); 
-                }
-                catch (Exception ex)
+                catch (OperationCanceledException) when (v_timeout.IsCancellationRequested)
                 {
-                    logger.LogError(ex, "Job {JobId} failed", job.Id);
-                    jobs.Finish(job.Id, JobStatus.Failed, null, ["Unity could not complete compilation. Check Bridge logs."]);
+                    m_jobs.Finish(v_job.Id, p_stoppingToken.IsCancellationRequested ? EnumJobStatus.Cancelled : EnumJobStatus.TimedOut, null,
+                        ["Compilation cancelled or timed out."]);
                 }
-                var finished = jobs.Get(job.Id)!;
+                catch (Exception v_ex)
+                {
+                    m_logger.LogError(v_ex, "Job {JobId} failed", v_job.Id);
+                    m_jobs.Finish(v_job.Id, EnumJobStatus.Failed, null, ["Unity could not complete compilation. Check Bridge logs."]);
+                }
+                var v_finished = m_jobs.Get(v_job.Id)!;
 
-                logger.LogInformation("Job {JobId}: {Status}, exit {ExitCode}, duration {Duration}, errors {Errors}", job.Id, 
-                    finished.Status, finished.ExitCode, finished.FinishedAt - finished.StartedAt, finished.ErrorCount);
+                m_logger.LogInformation("Job {JobId}: {Status}, exit {ExitCode}, duration {Duration}, errors {Errors}", v_job.Id,
+                    v_finished.Status, v_finished.ExitCode, v_finished.FinishedAt - v_finished.StartedAt, v_finished.ErrorCount);
             }
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (p_stoppingToken.IsCancellationRequested)
+        {
+            // Host shutdown cancels the pending queue read.
+        }
     }
 }

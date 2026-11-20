@@ -2,7 +2,7 @@ using Microsoft.Extensions.Configuration;
 
 namespace UnityBridge.Configuration;
 
-public sealed class BridgeOptions
+public sealed class CBridgeOptions
 {
     public string Host { get; set; } = "0.0.0.0";
     public int Port { get; set; } = 8765;
@@ -11,34 +11,62 @@ public sealed class BridgeOptions
     public int MaxLogLines { get; set; } = 300;
     public int JobTimeoutMinutes { get; set; } = 30;
 }
-public sealed class UnityOptions
+
+public sealed class CUnityOptions
 {
     public string EditorPath { get; set; } = "";
     public string ProjectPath { get; set; } = "";
     public string LogDirectory { get; set; } = "";
 }
-public sealed record BridgeSettings(BridgeOptions Bridge, UnityOptions Unity)
+
+public sealed record CBridgeSettings
 {
-    public bool UnityAvailable => File.Exists(Unity.EditorPath);
-    public bool ProjectAvailable => Directory.Exists(Path.Combine(Unity.ProjectPath, "Assets")) 
-            && Directory.Exists(Path.Combine(Unity.ProjectPath, "ProjectSettings"));
-    public static BridgeSettings Load(IConfiguration config)
+    public CBridgeOptions Bridge { get; init; }
+    public CUnityOptions Unity { get; init; }
+
+    public CBridgeSettings(CBridgeOptions p_bridge, CUnityOptions p_unity)
     {
-        var b = config.GetSection("Bridge").Get<BridgeOptions>() ?? new();
+        Bridge = p_bridge;
+        Unity = p_unity;
+    }
 
-        var u = config.GetSection("Unity").Get<UnityOptions>() ?? new();
+    public void Deconstruct(out CBridgeOptions p_bridge, out CUnityOptions p_unity)
+    {
+        p_bridge = Bridge;
+        p_unity = Unity;
+    }
 
-        if (!System.Net.IPAddress.TryParse(b.Host, out _) || b.Port is < 1 or > 65535 ||
-            b.MaxQueuedJobs is < 1 or > 3 || b.MaxLogLines is < 1 or > 300 || b.JobTimeoutMinutes is < 1 or > 1440)
-                throw new InvalidOperationException("Invalid Bridge limits or listen address.");
-        if (string.IsNullOrWhiteSpace(b.ApiToken) || b.ApiToken == "CHANGE_ME")
-                throw new InvalidOperationException("Set Bridge:ApiToken to a non-placeholder token (or use Bridge__ApiToken).");
+    public bool UnityAvailable => File.Exists(Unity.EditorPath);
+    public bool ProjectAvailable => Directory.Exists(Path.Combine(Unity.ProjectPath, "Assets"))
+            && Directory.Exists(Path.Combine(Unity.ProjectPath, "ProjectSettings"));
+    public static CBridgeSettings Load(IConfiguration p_config)
+    {
+        var v_bridge = p_config.GetSection("Bridge").Get<CBridgeOptions>() ?? new();
 
-        if (new[] { u.EditorPath, u.ProjectPath, u.LogDirectory }.Any(string.IsNullOrWhiteSpace))
-                throw new InvalidOperationException("Unity paths must be configured.");
+        var v_unity = p_config.GetSection("Unity").Get<CUnityOptions>() ?? new();
 
-        Directory.CreateDirectory(u.LogDirectory);
+        // Validate the listen address, queue limits, credentials, and Unity paths.
+        if (!System.Net.IPAddress.TryParse(v_bridge.Host, out _)
+            || v_bridge.Port is < 1 or > 65535
+            || v_bridge.MaxQueuedJobs is < 1 or > 3
+            || v_bridge.MaxLogLines is < 1 or > 300
+            || v_bridge.JobTimeoutMinutes is < 1 or > 1440)
+        {
+            throw new InvalidOperationException("Invalid Bridge limits or listen address.");
+        }
+        if (string.IsNullOrWhiteSpace(v_bridge.ApiToken)
+            || v_bridge.ApiToken == "CHANGE_ME")
+        {
+            throw new InvalidOperationException("Set Bridge:ApiToken to a non-placeholder token (or use Bridge__ApiToken).");
+        }
 
-        return new(b, u);
+        if (new[] { v_unity.EditorPath, v_unity.ProjectPath, v_unity.LogDirectory }.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidOperationException("Unity paths must be configured.");
+        }
+
+        Directory.CreateDirectory(v_unity.LogDirectory);
+
+        return new(v_bridge, v_unity);
     }
 }

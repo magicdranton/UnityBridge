@@ -7,148 +7,203 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using UnityBridge.Configuration;
 using UnityBridge.Jobs;
 
 namespace UnityBridge.Api;
 
-public sealed class HttpServer(BridgeSettings settings, JobManager jobs) : IHostedService
+public sealed class CHttpServer : IHostedService
 {
-    private WebApplication? app;
-    private static IResult Error(int status, string code, string message) => Results.Json(new { error = new { code, message } }, statusCode: status);
-    public async Task StartAsync(CancellationToken cancellationToken)
+    private readonly CBridgeSettings m_settings;
+    private readonly CJobManager m_jobs;
+    private WebApplication? m_app;
+    private ILogger<CHttpServer> m_Logger;
+
+    public CHttpServer(CBridgeSettings p_settings, CJobManager p_jobs, ILogger<CHttpServer> p_Logger)
     {
-        var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [] });
-        builder.WebHost.ConfigureKestrel(o => 
-        { 
-            o.Listen(System.Net.IPAddress.Parse(settings.Bridge.Host), settings.Bridge.Port); 
-            o.Limits.MaxRequestBodySize = 4096; 
+        m_settings = p_settings;
+        m_jobs = p_jobs;
+        m_Logger = p_Logger;
+    }
+
+    private static IResult Error(int p_status, string p_code, string p_message) => Results.Json(new
+    {
+        error = new
+        {
+            code = p_code,
+            message = p_message
+        }
+    }, statusCode: p_status);
+    public async Task StartAsync(CancellationToken p_cancellationToken)
+    {
+        var v_builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
+        {
+            Args = []
+        });
+        v_builder.WebHost.ConfigureKestrel(p_options =>
+        {
+            p_options.Listen(System.Net.IPAddress.Parse(m_settings.Bridge.Host), m_settings.Bridge.Port);
+            p_options.Limits.MaxRequestBodySize = 4096;
+
+            m_Logger.LogInformation("HttpServer: listening on {Host}:{Port}", 
+                m_settings.Bridge.Host, m_settings.Bridge.Port);
         });
 
-        builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
-        app = builder.Build();
+        v_builder.Services.ConfigureHttpJsonOptions(p_options => p_options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+        m_app = v_builder.Build();
 
-        var expected = SHA256.HashData(Encoding.UTF8.GetBytes(settings.Bridge.ApiToken));
+        var v_expected = SHA256.HashData(Encoding.UTF8.GetBytes(m_settings.Bridge.ApiToken));
 
-        app.Use(async (context, next) =>
+        // Authenticate all endpoints except the public health check.
+        m_app.Use(async (p_context, p_next) =>
         {
             try
             {
-                if (context.Request.Path != "/health")
+                if (p_context.Request.Path != "/health")
                 {
-                    var header = context.Request.Headers.Authorization.ToString();
+                    var v_header = p_context.Request.Headers.Authorization.ToString();
 
-                    if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ||
-                        !CryptographicOperations.FixedTimeEquals(expected, SHA256.HashData(Encoding.UTF8.GetBytes(header[7..]))))
-                    { 
-                        await Error(401, "UNAUTHORIZED", "A valid bearer token is required.").ExecuteAsync(context); 
-                        return; 
+                    if (!v_header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+                        || !CryptographicOperations.FixedTimeEquals(v_expected, SHA256.HashData(Encoding.UTF8.GetBytes(v_header[7..]))))
+                    {
+                        await Error(401, "UNAUTHORIZED", "A valid bearer token is required.").ExecuteAsync(p_context);
+                        return;
                     }
                 }
-                await next(context);
+                await p_next(p_context);
             }
-            catch (BadHttpRequestException ex) 
-            { 
-                await Error(ex.StatusCode, "INVALID_REQUEST", "Invalid request or body too large.").ExecuteAsync(context); 
+            catch (BadHttpRequestException v_ex)
+            {
+                await Error(v_ex.StatusCode, "INVALID_REQUEST", "Invalid request or body too large.").ExecuteAsync(p_context);
             }
-            catch (Exception) when (!context.Response.HasStarted) 
-            { 
-                await Error(500, "INTERNAL_ERROR", "The request could not be completed.").ExecuteAsync(context); 
+            catch (Exception) when (!p_context.Response.HasStarted)
+            {
+                await Error(500, "INTERNAL_ERROR", "The request could not be completed.").ExecuteAsync(p_context);
             }
         });
-        
-        app.MapGet("/health", () =>
+
+        m_app.MapGet("/health", () =>
         {
             Results.Ok(new
             {
                 status = "ok",
-                unityAvailable = settings.UnityAvailable,
-                projectAvailable = settings.ProjectAvailable,
-                activeJob = jobs.Active is { } j ? new { j.Id, j.Type } : null
+                unityAvailable = m_settings.UnityAvailable,
+                projectAvailable = m_settings.ProjectAvailable,
+                activeJob = m_jobs.Active is { } v_activeJob ? new
+                {
+                    v_activeJob.Id,
+                    v_activeJob.Type
+                } : null
             });
-        });        
+        });
 
-        app.MapPost("/api/v1/jobs/compile", async (HttpRequest request) =>
+        m_app.MapPost("/api/v1/jobs/compile", async (HttpRequest p_request) =>
         {
             // Only an empty JSON object is accepted; no client paths or arguments.
             try
             {
-                using var body = await JsonDocument.ParseAsync(request.Body, cancellationToken: request.HttpContext.RequestAborted);
+                using var v_body = await JsonDocument.ParseAsync(p_request.Body, cancellationToken: p_request.HttpContext.RequestAborted);
 
-                if (body.RootElement.ValueKind != JsonValueKind.Object || body.RootElement.EnumerateObject().Any())
+                if (v_body.RootElement.ValueKind != JsonValueKind.Object
+                    || v_body.RootElement.EnumerateObject().Any())
+                {
                     return Error(400, "INVALID_REQUEST", "Expected an empty JSON object.");
+                }
             }
-            catch (JsonException) 
-            { 
-                return Error(400, "INVALID_REQUEST", "Expected an empty JSON object."); 
+            catch (JsonException)
+            {
+                return Error(400, "INVALID_REQUEST", "Expected an empty JSON object.");
             }
 
-            if (!settings.UnityAvailable) return Error(503, "UNITY_NOT_FOUND", "Unity Editor executable was not found.");
+            if (!m_settings.UnityAvailable)
+            {
+                return Error(503, "UNITY_NOT_FOUND", "Unity Editor executable was not found.");
+            }
 
-            if (!settings.ProjectAvailable) return Error(503, "PROJECT_NOT_FOUND", "Configured Unity project was not found.");
+            if (!m_settings.ProjectAvailable)
+            {
+                return Error(503, "PROJECT_NOT_FOUND", "Configured Unity project was not found.");
+            }
 
-            var job = jobs.Enqueue();
+            var v_job = m_jobs.Enqueue();
 
-            return job is null ? Error(429, "QUEUE_FULL", "The job queue is full.") : Results.Accepted($"/api/v1/jobs/{job.Id}", 
-                new 
-                { 
-                    jobId = job.Id, 
-                    status = job.Status, 
-                    statusUrl = $"/api/v1/jobs/{job.Id}", 
-                    logsUrl = $"/api/v1/jobs/{job.Id}/logs" 
+            return v_job is null ? Error(429, "QUEUE_FULL", "The job queue is full.") : Results.Accepted($"/api/v1/jobs/{v_job.Id}",
+                new
+                {
+                    jobId = v_job.Id,
+                    status = v_job.Status,
+                    statusUrl = $"/api/v1/jobs/{v_job.Id}",
+                    logsUrl = $"/api/v1/jobs/{v_job.Id}/logs"
                 });
         });
 
-        app.MapGet("/api/v1/jobs/{id}", (string id) =>
-            Guid.TryParse(id, out var guid) && jobs.Get(guid) is { } job ? Results.Ok(job) : Error(404, "JOB_NOT_FOUND", "Job was not found."));
-
-        app.MapGet("/api/v1/jobs/{id}/logs", async (string id, HttpRequest request) =>
+        m_app.MapGet("/api/v1/jobs/{id}", ([Microsoft.AspNetCore.Mvc.FromRoute(Name = "id")] string p_id) =>
         {
-            if (!Guid.TryParse(id, out var guid) || jobs.Get(guid) is not { } job) return Error(404, "JOB_NOT_FOUND", "Job was not found.");
+            return Guid.TryParse(p_id, out var v_guid)
+                && m_jobs.Get(v_guid) is { } v_job
+                    ? Results.Ok(v_job)
+                    : Error(404, "JOB_NOT_FOUND", "Job was not found.");
+        });
 
-            var count = Math.Min(100, settings.Bridge.MaxLogLines);
-
-            if (request.Query.TryGetValue("lines", out var lines) 
-                && (!int.TryParse(lines, out count) || count < 1 || count > settings.Bridge.MaxLogLines))
-                    return Error(400, "INVALID_LINES", $"lines must be between 1 and {settings.Bridge.MaxLogLines}.");
-            var tail = new Queue<string>();
-
-            var truncated = false;
-
-            if (File.Exists(job.LogPath))
+        m_app.MapGet("/api/v1/jobs/{id}/logs", async ([Microsoft.AspNetCore.Mvc.FromRoute(Name = "id")] string p_id, HttpRequest p_request) =>
+        {
+            if (!Guid.TryParse(p_id, out var v_guid)
+                || m_jobs.Get(v_guid) is not { } v_job)
             {
-                using var stream = new FileStream(job.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(stream);
+                return Error(404, "JOB_NOT_FOUND", "Job was not found.");
+            }
 
-                while (await reader.ReadLineAsync(request.HttpContext.RequestAborted) is { } line)
-                { 
-                    tail.Enqueue(line); 
-                    
-                    if (tail.Count > count) 
-                    { 
-                        tail.Dequeue(); truncated = true; 
-                    } 
+            var v_count = Math.Min(100, m_settings.Bridge.MaxLogLines);
+
+            if (p_request.Query.TryGetValue("lines", out var v_lines)
+                && (!int.TryParse(v_lines, out v_count)
+                    || v_count < 1
+                    || v_count > m_settings.Bridge.MaxLogLines))
+            {
+                return Error(400, "INVALID_LINES", $"lines must be between 1 and {m_settings.Bridge.MaxLogLines}.");
+            }
+            // Retain only the requested tail while reading the log.
+            var v_tail = new Queue<string>();
+
+            var v_truncated = false;
+
+            if (File.Exists(v_job.LogPath))
+            {
+                using var v_stream = new FileStream(v_job.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var v_reader = new StreamReader(v_stream);
+
+                while (await v_reader.ReadLineAsync(p_request.HttpContext.RequestAborted) is { } v_line)
+                {
+                    v_tail.Enqueue(v_line);
+
+                    if (v_tail.Count > v_count)
+                    {
+                        v_tail.Dequeue();
+                        v_truncated = true;
+                    }
                 }
             }
 
-            return Results.Ok(new 
-                { 
-                    jobId = job.Id, 
-                    lines = tail.ToArray(), 
-                    truncated 
-                });
+            return Results.Ok(new
+            {
+                jobId = v_job.Id,
+                lines = v_tail.ToArray(),
+                truncated = v_truncated
+            });
         });
 
-        app.MapFallback(() => Error(404, "NOT_FOUND", "Endpoint was not found."));
+        m_app.MapFallback(() => Error(404, "NOT_FOUND", "Endpoint was not found."));
 
-        await app.StartAsync(cancellationToken);
+        await m_app.StartAsync(p_cancellationToken);
     }
-    public async Task StopAsync(CancellationToken cancellationToken)
-    { 
-        if (app is not null) 
-        { 
-            await app.StopAsync(cancellationToken); 
-            await app.DisposeAsync(); 
-        } 
+
+    public async Task StopAsync(CancellationToken p_cancellationToken)
+    {
+        if (m_app is not null)
+        {
+            await m_app.StopAsync(p_cancellationToken);
+            await m_app.DisposeAsync();
+        }
     }
 }
