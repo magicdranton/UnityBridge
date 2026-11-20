@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -5,6 +6,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -60,6 +62,8 @@ public sealed class CHttpServer : IHostedService
         {
             try
             {
+                await LogRequestAsync(p_context.Request);
+
                 if (p_context.Request.Path != "/health")
                 {
                     var v_header = p_context.Request.Headers.Authorization.ToString();
@@ -85,7 +89,7 @@ public sealed class CHttpServer : IHostedService
 
         m_app.MapGet("/health", () =>
         {
-            Results.Ok(new
+            return Results.Ok(new
             {
                 status = "ok",
                 unityAvailable = m_settings.UnityAvailable,
@@ -95,6 +99,28 @@ public sealed class CHttpServer : IHostedService
                     v_activeJob.Id,
                     v_activeJob.Type
                 } : null
+            });
+        });
+
+        // Return a consistent job snapshot; authentication is enforced by the middleware.
+        m_app.MapGet("/api/v1/status", () =>
+        {
+            var v_snapshot = m_jobs.GetStatus();
+
+            return Results.Ok(new
+            {
+                bridgeVersion = typeof(CHttpServer).Assembly.GetName().Version?.ToString(3),
+                unityVersion = GetUnityVersion(),
+                unityAvailable = m_settings.UnityAvailable,
+                projectAvailable = m_settings.ProjectAvailable,
+                activeJob = v_snapshot.ActiveJob is { } v_activeJob ? new
+                {
+                    v_activeJob.Id,
+                    v_activeJob.Type
+                } : null,
+                queuedJobs = v_snapshot.QueuedJobs,
+                completedJobs = v_snapshot.CompletedJobs,
+                failedJobs = v_snapshot.FailedJobs
             });
         });
 
@@ -196,6 +222,57 @@ public sealed class CHttpServer : IHostedService
         m_app.MapFallback(() => Error(404, "NOT_FOUND", "Endpoint was not found."));
 
         await m_app.StartAsync(p_cancellationToken);
+    }
+
+    private async Task LogRequestAsync(HttpRequest p_request)
+    {
+        var v_bodyPreview = "";
+
+        // Buffer and rewind the body so endpoint handlers can still read the full request.
+        p_request.EnableBuffering();
+        var v_position = p_request.Body.Position;
+
+        try
+        {
+            using var v_reader = new StreamReader(p_request.Body, Encoding.UTF8, leaveOpen: true);
+            var v_buffer = new char[50];
+            var v_length = await v_reader.ReadBlockAsync(v_buffer.AsMemory(), p_request.HttpContext.RequestAborted);
+            v_bodyPreview = new string(v_buffer, 0, v_length);
+        }
+        finally
+        {
+            p_request.Body.Position = v_position;
+
+            if (v_bodyPreview.Length > 0)
+            {
+                m_Logger.LogInformation("HttpServer: {Method} {Url}; Body: {Body}",
+                    p_request.Method, p_request.GetEncodedPathAndQuery(), v_bodyPreview);
+            }
+            else
+            {
+                m_Logger.LogInformation("HttpServer: {Method} {Url}",
+                    p_request.Method, p_request.GetEncodedPathAndQuery());
+            }
+        }
+    }
+
+    private string? GetUnityVersion()
+    {
+        // Read the configured Editor version without starting a Unity process.
+        try
+        {
+            return m_settings.UnityAvailable
+                ? FileVersionInfo.GetVersionInfo(m_settings.Unity.EditorPath).ProductVersion
+                : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     public async Task StopAsync(CancellationToken p_cancellationToken)

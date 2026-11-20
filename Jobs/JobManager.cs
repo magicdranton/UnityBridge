@@ -123,6 +123,42 @@ public sealed class CJobManager
         }
     }
 
+    public (CJobResult? ActiveJob, int QueuedJobs, int CompletedJobs, int FailedJobs) GetStatus()
+    {
+        // Read the active job and counters under one lock to avoid mixed states.
+        lock (m_gate)
+        {
+            CJobResult? v_activeJob = null;
+            var v_queuedJobs = 0;
+            var v_completedJobs = 0;
+            var v_failedJobs = 0;
+
+            foreach (var v_job in m_jobs.Values)
+            {
+                switch (v_job.Status)
+                {
+                    case EnumJobStatus.Queued:
+                        v_queuedJobs++;
+                        break;
+                    case EnumJobStatus.Running:
+                        v_activeJob = v_job;
+                        break;
+                    case EnumJobStatus.Succeeded:
+                    case EnumJobStatus.Cancelled:
+                        v_completedJobs++;
+                        break;
+                    case EnumJobStatus.Failed:
+                    case EnumJobStatus.TimedOut:
+                        v_completedJobs++;
+                        v_failedJobs++;
+                        break;
+                }
+            }
+
+            return (v_activeJob, v_queuedJobs, v_completedJobs, v_failedJobs);
+        }
+    }
+
     public CJobResult? Get(Guid p_id)
     {
         lock (m_gate)
